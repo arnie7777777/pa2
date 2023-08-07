@@ -1,59 +1,60 @@
 from TCP_socket_p2 import TCP_Connection
 
 class TCP_Connection_Final(TCP_Connection):
-	"""docstring for TCP_Connection_Final"""
-	def __init__(self, self_address, dst_address, self_seq_num, dst_seq_num, log_file=None):
-		super().__init__(self_address, dst_address, self_seq_num, dst_seq_num, log_file)
-	
-	def handle_timeout(self):
-    # Check if there is any unacknowledged data to retransmit
-		if self.SND.UNA < self.SND.NXT:
-        # Retransmit the oldest unacknowledged packet
-			seq = self.SND.UNA
-			data = self.send_buff[seq - self.SND.ISS]
-			self._packetize_and_send(seq, data=data)
-		pass
+    def __init__(self, self_address, dst_address, self_seq_num, dst_seq_num, log_file=None):
+        super().__init__(self_address, dst_address, self_seq_num, dst_seq_num, log_file)
 
-	def handle_window_timeout(self):
-		self._packetize_and_send(self.SND.NXT)
+    def handle_timeout(self):
+        if self.send_buff:
+            # Resend the oldest unacknowledged packet
+            packet = self.send_buff[0]
+            psh_flag = (packet['flags'] & 0x08) != 0
+            self._packetize_and_send(packet['SEQ'], PSH=psh_flag, data=packet['data'])
+            # Increase the RTO timer
+            self.RTO_timer.set_length(self.RTO_timer.timer_length * 2)
 
-    # Send an empty packet to keep the connection alive
-		#put code to handle window timeout here
-		#in other words, if we haven't sent any data in while (which causes this time to go off),
-		#send an empty packet	
-	pass
+    def handle_window_timeout(self):
+        if not self.send_buff:
+            # Send a packet containing the most recent data
+            if self.last_packet[0] != -1:
+                self._packetize_and_send(self.last_packet[0], PSH=self.last_packet[1], data=self.last_packet[2])
+            # Increase the window timer
+            self.window_timer.set_length(self.window_timer.timer_length * 2)
 
-	def receive_packets(self, packets):
-			#insert code to deal with a list of incoming packets here
-			#NOTE: this code can send one packet, but should never send more than one packet
-		pass
+    def receive_packets(self, packets):
+        for packet in packets:
+            # Read packet data into the receive buffer
+            seq_num = packet['SEQ']
+            data = packet['data']
+            if seq_num >= self.receive_buffer_start_seq and seq_num < self.receive_buffer_start_seq + self.RCV.WND:
+                index = seq_num - self.receive_buffer_start_seq
+                self.receive_buffer[index] = data[:self.RCV.MSS]
+                psh_flag = (packet['flags'] & 0x08) != 0
+                if psh_flag:
+                    self.receive_buffer[index] += b'PSH'
+            # Update RTT timer and RTO timer
+            if seq_num == self.RTT_Sequence_num:
+                self.RTT_timer.stop_timer()
+                self.RTT_timer.reset_timer()
+                self.RTT_timer.set_and_start(self.RTT_timer.timer_length)
+                self.RTO_timer.set_length(self.RTT_timer.check_time() * 2)
 
-	def send_data(self, window_timeout = False, RTO_timeout = False):
-    # Check if there is any data to send
-		if self.send_buff and self.SND.NXT < self.SND.UNA + self.SND.WND:
-			# Get the next data to send
-			seq = self.SND.NXT
-			data = self.send_buff[seq - self.SND.ISS]
-
-			packet = {
-            'SRC': self.SRC,
-            'DST': self.DST,
-            'SEQ': seq,
-            'ACK': self.RCV.NXT,
-            'flags': {
-                'ACK': True,
-                'PSH': False
-            },
-            'WND': self.RCV.WND,
-            'data': data
-        }
-			# Send the packet
-			self._packetize_and_send(packet)
-
-			# Update SND.NXT
-			self.SND.NXT += len(data)
-				#put code to send a single packet of data here
-				#note that this code does not always need to send data, only if TCP policy thinks it makes sense
-				#if there is any data to send, i.e. we have data we have not sent and we are allowed to send by our
-				#congestion and flow control windows, then send one packet of that data
-			pass
+    def send_data(self, window_timeout=False, RTO_timeout=False):
+        if not window_timeout and not RTO_timeout:
+            # Load the correct data from the send buffer and send a single packet
+            if self.send_buff:
+                packet = self.send_buff[0]
+                psh_flag = (packet['flags'] & 0x08) != 0
+                self._packetize_and_send(packet['SEQ'], PSH=psh_flag, data=packet['data'])
+                # Update congestion control window
+                self.congestion_window = min(self.congestion_window, self.SND.WND)
+                # Set the RTT timer
+                if not self.RTT_timer.is_running():
+                    self.RTT_timer.set_and_start(self.RTT_timer.timer_length)
+        elif RTO_timeout:
+            # Resend the oldest unacknowledged packet
+            self.handle_timeout()
+        elif window_timeout:
+            # Send a packet containing the most recent data
+            if self.last_packet[0] != -1:
+                self._packetize_and_send(self.last_packet[0], PSH=self.last_packet[1], data=self.last_packet[2])
